@@ -3,8 +3,10 @@
 // @namespace    http://tampermonkey.net/
 // @version      1.5
 // @description  Affiche les containers Docker sous forme de cartes modernes avec menu contextuel compatible Unraid (dropdown natif).
-// @author       JamesDAdams (Copilot)
+// @author       JamesDAdams
+// @match        https://192.168.1.100/Docker/
 // @match        https://192.168.1.100/Docker
+// @exclude      https://192.168.1.100/Docker/AddContainer*
 // @grant        GM_addStyle
 // ==/UserScript==
 
@@ -39,6 +41,7 @@
         .docker-card[data-status="up-to-date"] { border-color: #426f46; }
         .docker-card[data-status="not available"] { border-color: #a58c2b; }
         .docker-card[data-status="other"] { border-color: #343a40; }
+        .docker-card[data-status="stopped"] { border-color: #ff4136; }
 
         .docker-card .card-header {
             display: flex;
@@ -168,6 +171,32 @@
             color: #ff4136;
         }
         .docker-card[data-autostart="on"] .autostart { color: #4ae84a; }
+
+        .docker-card .card-body .docker-volumes-scroll {
+            height: 120px !important;
+            max-height: 120px !important;
+            min-height: 0 !important;
+            overflow-y: auto !important;
+            overflow-x: hidden !important;
+            width: 100% !important;
+            display: block !important;
+            margin-top: 4px;
+            margin-bottom: 4px;
+            padding-right: 4px;
+            background: none;
+            position: relative;
+            box-sizing: border-box;
+        }
+        .docker-card .card-body .docker-volumes-scroll ul {
+            margin: 0;
+            padding-left: 18px;
+            overflow: visible !important;
+        }
+        .docker-card .card-body .docker-volumes-scroll li {
+            word-break: break-all;
+            overflow-wrap: anywhere;
+            white-space: pre-line;
+        }
     `);
 
     function normalizeActionKey(label) {
@@ -303,20 +332,20 @@
 
         if (cpuSpan && ramSpan) {
             const observer = new MutationObserver(() => {
-                cpu = cpuSpan.textContent.trim()
-                ram = ramSpan.textContent.trim()
-                const card = document.querySelector(`.docker-card[data-id="${containerId}"]`)
+                cpu = cpuSpan.textContent.trim();
+                ram = ramSpan.textContent.trim();
+                const card = document.querySelector(`.docker-card[data-id="${containerId}"]`);
                 if (card) {
-                    const cpuField = card.querySelector('.card-body div:nth-child(5) span')
-                    const ramField = card.querySelector('.card-body div:nth-child(6) span')
-                    if (cpuField) cpuField.textContent = cpu
-                    if (ramField) ramField.textContent = ram
+                    const cpuField = card.querySelector('.docker-card-cpu');
+                    const ramField = card.querySelector('.docker-card-ram');
+                    if (cpuField) cpuField.textContent = cpu;
+                    if (ramField) ramField.textContent = ram;
                 }
-            })
-            observer.observe(cpuSpan, { childList: true })
-            observer.observe(ramSpan, { childList: true })
+            });
+            observer.observe(cpuSpan, { childList: true });
+            observer.observe(ramSpan, { childList: true });
         } else {
-            console.warn(`Spans non trouvés pour containerId ${containerId}`)
+            console.warn(`Spans non trouvés pour containerId ${containerId}`);
         }
 
         let autostart = false
@@ -354,6 +383,33 @@
             if (key) actions[key] = anchor
         })
 
+        // Ajout : récupération des volumes mappings
+        let volumes = [];
+        // Correction : les volumes sont dans la colonne 6 (index 6)
+        const volumesCell = columns[6];
+        if (volumesCell) {
+            volumesCell.querySelectorAll('span.docker_readmore').forEach(span => {
+                // Clone le span pour ne pas toucher au DOM original
+                const clone = span.cloneNode(true);
+                // Supprime le style height si présent
+                if (clone.style && clone.style.height) {
+                    clone.style.height = '';
+                }
+                // Découpe le HTML sur <br> pour chaque mapping
+                const html = clone.innerHTML;
+                // Sépare sur <br> (ou <br/>)
+                html.split(/<br\s*\/?>/i).forEach(part => {
+                    // Nettoie et recompose le HTML (garde les icônes et structure)
+                    const tempDiv = document.createElement('div');
+                    tempDiv.innerHTML = part.trim();
+                    // Si non vide, ajoute comme volume individuel
+                    if (tempDiv.innerHTML.replace(/\s/g, '').length > 0) {
+                        volumes.push(tempDiv.innerHTML);
+                    }
+                });
+            });
+        }
+
         return {
             name,
             logo,
@@ -372,7 +428,8 @@
             supportUrl,
             donateUrl,
             containerId,
-            actions
+            actions,
+            volumes,
         }
 
 
@@ -386,15 +443,18 @@
 
         let stateIcon = '<i class="fa fa-play"></i>';
         let stateText = "Running";
+        // Ajout : si le container est arrêté, status = "stopped"
         if (container.state.toLowerCase().includes("started")) {
             stateIcon = '<i class="fa fa-play"></i>';
             stateText = "Running";
         } else {
             stateIcon = '<i class="fa fa-stop"></i>';
             stateText = "Stopped";
+            status = "stopped";
         }
 
         const autoText = container.autostart ? "ON" : "OFF";
+        const autoColor = container.autostart ? "#4ae84a" : "#ff4136";
 
         const card = document.createElement('div');
         card.className = 'docker-card';
@@ -405,7 +465,7 @@
         card.setAttribute('data-autostart', container.autostart ? 'on' : 'off');
 
         // --- Injection du span original avec onclick ---
-        // On récupère le span original depuis le tableau source
+        // On récupère le span pour éviter de le retirer du DOM original
         const originalSpan = document.getElementById(container.containerId);
         let spanHtml = "";
         let spanOnClick = "";
@@ -445,14 +505,25 @@
         const bodyDiv = document.createElement('div');
         bodyDiv.className = 'card-body';
         bodyDiv.innerHTML = `
-            <div><strong>Network:</strong> <span>${container.network}</span></div>
-            <div><strong>IP:</strong> <span>${container.ip}</span></div>
-            <div><strong>Port:</strong> <span>${container.port}</span></div>
+            <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:8px;">
+                <span style="min-width:90px;max-width:180px;overflow:hidden;text-overflow:ellipsis;"><strong>Network:</strong> <span>${container.network}</span></span>
+                <span style="min-width:90px;max-width:180px;overflow:hidden;text-overflow:ellipsis;"><strong>IP:</strong> <span>${container.ip}</span></span>
+                <span style="min-width:70px;max-width:120px;overflow:hidden;text-overflow:ellipsis;"><strong>Port:</strong> <span>${container.port}</span></span>
+                <span style="min-width:90px;max-width:180px;overflow:hidden;text-overflow:ellipsis;"><strong>Uptime:</strong> <span>${container.uptime}</span></span>
+                <span style="min-width:90px;max-width:180px;overflow:hidden;text-overflow:ellipsis;"><strong>Created:</strong> <span>${container.created}</span></span>
+                <span style="min-width:90px;max-width:120px;overflow:hidden;text-overflow:ellipsis;"><strong>Autostart:</strong> <span class="autostart" style="color:${autoColor};font-weight:bold">${autoText}</span></span>
+                <span style="min-width:70px;max-width:90px;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;margin-right:0;"><strong>CPU:</strong>&nbsp;<span class="docker-card-cpu">${container.cpu}</span></span>
+                <span style="min-width:70px;max-width:120px;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;margin-left:0;"><strong>RAM:</strong>&nbsp;<span class="docker-card-ram">${container.ram}</span></span>
+            </div>
             <div class="card-sep"></div>
             ${
-                isAdvancedViewEnabled()
-                ? `<div><strong>CPU:</strong> <span>${container.cpu}</span></div>
-                   <div><strong>RAM:</strong> <span>${container.ram}</span></div>`
+                container.volumes && container.volumes.length
+                ? `<div class="docker-volumes-scroll">
+                    <strong>Volumes:</strong>
+                    <ul>
+                        ${container.volumes.map(v => `<li>${v}</li>`).join('')}
+                    </ul>
+                   </div>`
                 : ''
             }
         `;
@@ -460,15 +531,103 @@
 
         const footerDiv = document.createElement('div');
         footerDiv.className = 'card-footer';
-        // Correction : chaque info sur une ligne séparée
-        footerDiv.innerHTML = `
-            <span><strong>Uptime:</strong> <span>${container.uptime}</span></span>
-            <span><strong>Created:</strong> <span>${container.created}</span></span>
-            <span><strong>Autostart:</strong> <span class="autostart">${autoText}</span></span>
-        `;
+        // Footer vide ou à personnaliser selon besoin
+        footerDiv.innerHTML = '';
         card.appendChild(footerDiv);
 
         return card;
+    }
+
+    // Regroupe les containers par préfixe commun (avant la première majuscule suivante ou chiffre ou séparateur)
+    function groupContainersByPrefix(containers) {
+        const groups = {};
+        const singles = [];
+        // On compte d'abord le nombre de containers par préfixe
+        const prefixCount = {};
+        containers.forEach(c => {
+            const match = c.name.match(/^([A-Z][a-z]+|[A-Z]+)[\s\-_.]*/);
+            const prefix = match ? match[1] : null;
+            if (prefix) {
+                prefixCount[prefix] = (prefixCount[prefix] || 0) + 1;
+            }
+        });
+        containers.forEach(c => {
+            const match = c.name.match(/^([A-Z][a-z]+|[A-Z]+)[\s\-_.]*/);
+            const prefix = match ? match[1] : null;
+            if (prefix && prefixCount[prefix] > 1) {
+                if (!groups[prefix]) groups[prefix] = [];
+                groups[prefix].push(c);
+            } else {
+                singles.push(c);
+            }
+        });
+        return { groups, singles };
+    }
+
+    // Crée une section collapsible pour un groupe de containers
+    function createCollapseSection(prefix, containers) {
+        const section = document.createElement('div');
+        section.className = 'docker-collapse-section';
+
+        // Header
+        const header = document.createElement('div');
+        header.className = 'docker-collapse-header';
+        header.style.cursor = 'pointer';
+        header.style.display = 'flex';
+        header.style.alignItems = 'center';
+        header.style.gap = '16px';
+        header.style.padding = '12px 18px 12px 18px';
+        header.style.background = '#181c21';
+        header.style.borderRadius = '12px';
+        header.style.marginBottom = '8px';
+        header.style.border = '1.5px solid #253251';
+        header.style.fontWeight = 'bold';
+        header.style.fontSize = '1.18em';
+
+        // Chevron
+        const chevron = document.createElement('span');
+        chevron.textContent = '▼';
+        chevron.style.transition = 'transform 0.2s';
+        chevron.style.fontSize = '1.1em';
+        header.appendChild(chevron);
+
+        // Titre
+        const title = document.createElement('span');
+        title.textContent = prefix + ' Stack';
+        header.appendChild(title);
+
+        // Infos (nombre de containers, running, healthy)
+        const total = containers.length;
+        const running = containers.filter(c => c.state.toLowerCase().includes('run')).length;
+        // Optionnel : healthy si tu veux l'ajouter
+        const healthy = containers.filter(c => c.state.toLowerCase().includes('healthy')).length;
+        const info = document.createElement('span');
+        info.style.fontWeight = 'normal';
+        info.style.fontSize = '0.95em';
+        info.style.marginLeft = 'auto';
+        info.innerHTML = `<span style="color:#b6c2e0;">${total} containers</span> <span style="color:#4ae84a;">${running} running</span> <span style="color:#50fa7b;">${healthy} healthy</span>`;
+        header.appendChild(info);
+
+        // Container pour les cards du groupe
+        const groupCards = document.createElement('div');
+        groupCards.className = 'docker-card-list';
+        groupCards.style.marginTop = '8px';
+
+        containers.forEach(c => groupCards.appendChild(createCard(c)));
+
+        // Collapse logic
+        let collapsed = false;
+        function setCollapsed(state) {
+            collapsed = state;
+            groupCards.style.display = collapsed ? 'none' : '';
+            chevron.style.transform = collapsed ? 'rotate(-90deg)' : 'rotate(0deg)';
+        }
+        header.addEventListener('click', () => setCollapsed(!collapsed));
+        setCollapsed(false);
+
+        section.appendChild(header);
+        section.appendChild(groupCards);
+        return section;
     }
 
     function replaceTableWithCards() {
@@ -486,18 +645,37 @@
 
         if (!containers.length) {
             table.style.display = '';
+            moveGlobalActionButtons();
             return;
         }
 
+        // Regroupement par préfixe
+        const { groups, singles } = groupContainersByPrefix(containers);
+
+        // Conteneur principal
         const cardList = document.createElement('div');
         cardList.className = 'docker-card-list';
+        cardList.style.flexDirection = 'column';
+        cardList.style.gap = '32px';
 
-        containers.forEach(container => {
-            cardList.appendChild(createCard(container));
+        // Ajoute les sections groupées
+        Object.entries(groups).forEach(([prefix, group]) => {
+            cardList.appendChild(createCollapseSection(prefix, group));
         });
+
+        // Ajoute les containers non groupés
+        if (singles.length) {
+            const singlesList = document.createElement('div');
+            singlesList.className = 'docker-card-list';
+            singles.forEach(container => {
+                singlesList.appendChild(createCard(container));
+            });
+            cardList.appendChild(singlesList);
+        }
 
         table.parentNode.insertBefore(cardList, table.nextSibling);
         table.style.display = 'none';
+        moveGlobalActionButtons();
     }
 
     function observeTable() {
@@ -527,15 +705,42 @@
         window.__dockerCardsAdvancedViewObs = true;
     }
 
+    function moveAddContainerButton() {
+        const addButton = document.getElementById('add_container');
+        const cardList = document.querySelector('.docker-card-list');
+        if (!addButton || !cardList) return;
+
+        // Déplace le bouton en dehors de la liste des cartes
+        cardList.parentNode.insertBefore(addButton, cardList.nextSibling);
+
+        // Centrer le bouton
+        const container = document.createElement('div');
+        container.style.textAlign = 'center';
+        container.style.margin = '16px 0';
+        addButton.parentNode.insertBefore(container, addButton);
+        container.appendChild(addButton);
+    }
+
+    function moveGlobalActionButtons() {
+        const globalActions = document.querySelector('.docker-global-actions');
+        const cardList = document.querySelector('.docker-card-list');
+        if (!globalActions || !cardList) return;
+
+        // Déplace les boutons d'action globale en dehors de la liste des cartes
+        cardList.parentNode.insertBefore(globalActions, cardList.nextSibling);
+    }
+
     window.addEventListener('DOMContentLoaded', function() {
         replaceTableWithCards();
         observeTable();
         observeAdvancedViewSwitch();
+        moveGlobalActionButtons();
     });
     setTimeout(function() {
         replaceTableWithCards();
         observeTable();
         observeAdvancedViewSwitch();
+        moveGlobalActionButtons();
     }, 1500);
 
 })();
